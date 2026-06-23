@@ -3434,6 +3434,8 @@ static void update_gameplay_delta_time(void)
     }
 }
 
+void gameplay_loop_draw();
+
 void gameplay_loop_logic()
 {
     if(flag_is_set(start_params.debug_flags, DFlg_PauseAtGameTurn))
@@ -3459,7 +3461,15 @@ void gameplay_loop_logic()
     if (is_feature_on(Ft_DeltaTime))
     {
         update_gameplay_delta_time();
-        if (game.process_turn_time < 1.0)
+        if (! network_is_active() && game.process_turn_time < 1.0)
+            return;
+
+        // Aim to exchange network packets before the turn ends.  If drawing
+        // another frame could miss this deadline, skip it.
+        const long double draw_ms = frametime_measurements.frametime_get_max[Frametime_Draw]
+                                  + frametime_measurements.frametime_get_max[Frametime_Sleep];
+        const long double draw_time = draw_ms / 1e3L * turns_per_second;
+        if (game.process_turn_time + adjust_time_for_multiplayer_speed(draw_time) < 1.0)
             return;
     }
 
@@ -3484,10 +3494,25 @@ void gameplay_loop_logic()
     input_eastegg();
     input();
     exchange_packets();
+
+    update_gameplay_delta_time();
+    if (game.process_turn_time > 2.0)
+        game.process_turn_time = 2.0;
+
+    if (network_is_active())
+    {
+        // Draw more frames until the next turn starts.
+        while (game.process_turn_time < 1.0)
+        {
+            gameplay_loop_draw();
+            update_gameplay_delta_time();
+        }
+    }
+
     update();
     frametime_end_measurement(Frametime_Logic);
 
-    game.process_turn_time -= 1;
+    game.process_turn_time -= 1.0;
 
     if(game.frame_step)
     {
@@ -3551,8 +3576,9 @@ extern "C" void network_yield_waiting_gameplay_packets()
 {
     do_draw = true;
     poll_inputs();
-    gameplay_loop_draw();
-    game.process_turn_time = min(game.process_turn_time, 2.L);
+    update_gameplay_delta_time();
+    if (game.process_turn_time <= 1.0 || time_since_last_draw > 1.0)
+        gameplay_loop_draw();
 }
 
 extern "C" void update_velocity(void);
