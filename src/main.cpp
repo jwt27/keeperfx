@@ -3408,22 +3408,12 @@ TbBool keeper_wait_for_screen_focus(void)
     return false;
 }
 
-static long double adjust_time_for_multiplayer_speed(long double t)
-{
-    if (multiplayer_speed_adjustment_ns != 0 && turns_per_second > 0) {
-        long double tick_ns_one_turn = 1e9L / turns_per_second;
-        long double tick_ns_adjusted_turn = tick_ns_one_turn + multiplayer_speed_adjustment_ns;
-        if (tick_ns_adjusted_turn > 0) {
-            t = t * tick_ns_one_turn / tick_ns_adjusted_turn;
-        }
-    }
-    return t;
-}
+static long double input_lag = 0;
 
 static void update_gameplay_delta_time(void)
 {
     if (is_feature_on(Ft_DeltaTime) == true) {
-        long double process_delta_time = adjust_time_for_multiplayer_speed(get_delta_time());
+        long double process_delta_time = get_delta_time();
         time_since_last_draw += process_delta_time;
         game.process_turn_time += process_delta_time;
     } else {
@@ -3438,6 +3428,8 @@ void gameplay_loop_draw();
 
 void gameplay_loop_logic()
 {
+    long double draw_time = 0;
+
     if(flag_is_set(start_params.debug_flags, DFlg_PauseAtGameTurn))
     {
         static GameTurn previous_gameturn = 0;
@@ -3468,8 +3460,8 @@ void gameplay_loop_logic()
         // another frame could miss this deadline, skip it.
         const long double draw_ms = frametime_measurements.frametime_get_max[Frametime_Draw]
                                   + frametime_measurements.frametime_get_max[Frametime_Sleep];
-        const long double draw_time = draw_ms / 1e3L * turns_per_second;
-        if (game.process_turn_time + adjust_time_for_multiplayer_speed(draw_time) < 1.0)
+        draw_time = draw_ms / 1e3L * turns_per_second;
+        if (game.process_turn_time + draw_time < 1.0 - input_lag)
             return;
     }
 
@@ -3501,12 +3493,27 @@ void gameplay_loop_logic()
 
     if (network_is_active())
     {
-        // Draw more frames until the next turn starts.
-        while (game.process_turn_time < 1.0)
+        constexpr int smoothing = 20;
+        const long double early = max(0.L, 1.L - game.process_turn_time);
+        const long double late  = max(0.L, game.process_turn_time - (1.L + draw_time));
+
+        if (netstate.my_id == SERVER_ID)
         {
-            gameplay_loop_draw();
-            update_gameplay_delta_time();
+            input_lag += (late - early) / smoothing;
+
+            // Draw more frames until the next turn starts.
+            while (game.process_turn_time < 1.0)
+            {
+                gameplay_loop_draw();
+                update_gameplay_delta_time();
+            }
         }
+        else
+        {
+            input_lag += (2 * late - .05) / smoothing;
+            game.process_turn_time += early - late;
+        }
+        input_lag = min(max(input_lag, 0.L), 1.L);
     }
 
     update();
