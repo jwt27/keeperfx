@@ -124,6 +124,13 @@ void LbNetwork_UpdateInputLagIfHost(void) {
         case INPUT_LAG_MODE_RELAY:      adjusted_ping = (average_ping); break;
     }
     int input_lag = CEILING(adjusted_ping / turn_time);
+    if (mode == INPUT_LAG_MODE_RELAY)
+    {
+        // Round input lag up to an even number for >2 player mode.
+        // If/when the netcode runs on a different thread from rendering and
+        // game logic, this can be removed.
+        input_lag += input_lag & 1;
+    }
     if (average_ping < 25) {input_lag = 0;} // LAN
     if (input_lag < 0) {input_lag = 0;} // Input lag cannot be below 0
     game.input_lag_turns = min(input_lag, MAXIMUM_INPUT_LAG_TURNS);
