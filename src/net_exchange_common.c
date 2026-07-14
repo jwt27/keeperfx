@@ -51,6 +51,7 @@ extern long double turn_start_offset;
 static void set_turn_start_offset(int ping_ms)
 {
     const float offset_ms = ping_ms / 2.f;
+    JUSTLOG("%f", offset_ms);
     turn_start_offset = max(offset_ms / 1e3L * turns_per_second, 0.L);
 }
 

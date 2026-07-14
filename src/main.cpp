@@ -3481,6 +3481,10 @@ static void gameplay_loop_draw()
         frametime_end_measurement(Frametime_Sleep);
     }
 
+    const float t = game.process_turn_time;
+    if (do_draw && (t < 0 || t > 1))
+        JUSTLOG("t=%f", t);
+
     // Floats are used a lot in the drawing related functions. But keep in mind integers are typically preferred for logic related functions.
     frametime_start_measurement(Frametime_Draw);
 
@@ -3521,6 +3525,8 @@ static void gameplay_loop_draw()
     }
 }
 
+static int wait_frames, wait_cycles;
+
 static void gameplay_loop_logic()
 {
     if(flag_is_set(start_params.debug_flags, DFlg_PauseAtGameTurn))
@@ -3552,6 +3558,9 @@ static void gameplay_loop_logic()
         camera_interpolate_offset = max(turn_start, 0.L);
     }
 
+    wait_frames = wait_cycles = 0;
+    const long double enter = game.process_turn_time;
+
     frametime_start_measurement(Frametime_Logic);
     if (frametime_enabled())
         framerate_measurement_capture(Framerate_Logic);
@@ -3574,6 +3583,11 @@ static void gameplay_loop_logic()
     input();
     update_local_cameras();
     exchange_packets();
+
+    update_gameplay_delta_time();
+    JUSTLOG("t=%f, enter=%f, host_packet=%f, scale=%f, avg_dt=%f, wait_frames=%i, wait_cycles=%i",
+            (float)game.process_turn_time, (float)enter, (float)host_packet_received, (float)multiplayer_clock_adjust, (float)average_frame_draw_time, wait_frames, wait_cycles);
+
     update_multiplayer_clock_adjust();
     update_gameplay_delta_time();
     if (game.process_turn_time > turns_per_second + 1)
@@ -3625,6 +3639,11 @@ extern "C" void network_yield_draw_gameplay()
 extern "C" void network_yield_waiting_gameplay_packets()
 {
     poll_inputs();
+    update_gameplay_delta_time();
+    if (game.process_turn_time <= 1.0 || time_since_last_draw > 1.0)
+        ++wait_frames;
+    else
+        ++wait_cycles;
     gameplay_loop_draw();
     update_gameplay_delta_time();
     // Reduce game speed during lag spikes.

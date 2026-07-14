@@ -178,6 +178,11 @@ TbError process_network_turn_sync_message(NetUserId source, const char *buffer, 
     int64_t one_way_latency_ns = (int64_t)(((uint64_t)GetPing(source) * 1000000 + 1) / 2);
     server_turn_position_ns = received_position_ns + one_way_latency_ns;
     server_turn_received_at = LbTimerClock();
+    const long double server_turn = server_turn_position_ns / 1e9L * turns_per_second;
+    const long double client_turn = get_current_turn_position_ns() / 1e9L * turns_per_second;
+    const long double diff = server_turn - client_turn;
+    if (diff >= .5 || diff <= -.5)
+        JUSTLOG("diff=%f", (float)diff);
     update_turn_speed_adjustment();
     return Lb_OK;
 }
