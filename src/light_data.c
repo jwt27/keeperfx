@@ -1984,8 +1984,8 @@ static char light_render_light(struct Light* lgt)
       lgt->reset_interpolation = false;
       lgt->previous_mappos = lgt->mappos;
   }
-  lgt->mappos.x.val = interpolate_synced(lgt->previous_mappos.x.val, lgt->mappos.x.val);
-  lgt->mappos.y.val = interpolate_synced(lgt->previous_mappos.y.val, lgt->mappos.y.val);
+  lgt->mappos.x.val = interpolate(lgt->previous_mappos.x.val, lgt->mappos.x.val);
+  lgt->mappos.y.val = interpolate(lgt->previous_mappos.y.val, lgt->mappos.y.val);
 
   TbBool is_dynamic = (lgt->flags & LgtF_Dynamic) != 0;
   int intensity;
@@ -2004,7 +2004,7 @@ static char light_render_light(struct Light* lgt)
 
     int rand_minimum = (lgt->intensity - 1) << 8;
     intensity = (lgt->intensity << 8) + 257;
-    render_intensity = rand_minimum + interpolate_synced(lgt->previous_intensity_random, lgt->intensity_random);
+    render_intensity = rand_minimum + interpolate(lgt->previous_intensity_random, lgt->intensity_random);
   }
   else
   {

@@ -142,9 +142,9 @@ extern unsigned char temp_cluedo_mode;
 
 extern TbSpriteData keepersprite_add[KEEPERSPRITE_ADD_NUM];
 /*****************************************************************************/
+float interpolate_camera_pos(float previous, float current);
+float interpolate_camera_angle(float previous, float current);
 float interpolate(float previous, float current);
-float interpolate_angle(float previous, float current);
-float interpolate_synced(float previous, float current);
 struct ThingInterpolateResult interpolate_thing(struct Thing *thing);
 
 int floor_height_for_volume_box(PlayerNumber plyr_idx, MapSlabCoord slb_x, MapSlabCoord slb_y);

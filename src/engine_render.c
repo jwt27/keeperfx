@@ -531,30 +531,32 @@ static void calculate_hud_scale(struct Camera *cam) {
 }
 
 extern float interpolate_time;  // main.cpp
+extern float camera_interpolate_time;  // main.cpp
+
+float interpolate_camera_pos(float previous, float current)
+{
+    if (! is_feature_on(Ft_DeltaTime))
+        return current;
+
+    return LbLerp(previous, current, camera_interpolate_time);
+}
+
+float interpolate_camera_angle(float previous, float current)
+{
+    if (! is_feature_on(Ft_DeltaTime))
+        return current;
+
+    return lerp_angle(previous, current, camera_interpolate_time);
+}
 
 float interpolate(float previous, float current)
 {
+    if (flag_is_set(game.operation_flags, GOF_Paused))
+        return current;
     if (! is_feature_on(Ft_DeltaTime))
         return current;
 
     return LbLerp(previous, current, interpolate_time);
-}
-
-float interpolate_angle(float previous, float current)
-{
-    if (! is_feature_on(Ft_DeltaTime))
-        return current;
-
-    return lerp_angle(previous, current, interpolate_time);
-}
-
-// For things that stop moving when the game is paused.
-float interpolate_synced(float previous, float current)
-{
-    if (flag_is_set(game.operation_flags, GOF_Paused))
-        return current;
-
-    return interpolate(previous, current);
 }
 
 struct ThingInterpolateResult interpolate_thing(struct Thing *thing)
@@ -569,10 +571,10 @@ struct ThingInterpolateResult interpolate_thing(struct Thing *thing)
     }
 
     // Interpolate position every frame
-    result.mappos.x.val = interpolate_synced(thing->previous_mappos.x.val, thing->mappos.x.val);
-    result.mappos.y.val = interpolate_synced(thing->previous_mappos.y.val, thing->mappos.y.val);
-    result.mappos.z.val = interpolate_synced(thing->previous_mappos.z.val, thing->mappos.z.val);
-    result.floor_height = interpolate_synced(thing->previous_floor_height, thing->floor_height);
+    result.mappos.x.val = interpolate(thing->previous_mappos.x.val, thing->mappos.x.val);
+    result.mappos.y.val = interpolate(thing->previous_mappos.y.val, thing->mappos.y.val);
+    result.mappos.z.val = interpolate(thing->previous_mappos.z.val, thing->mappos.z.val);
+    result.floor_height = interpolate(thing->previous_floor_height, thing->floor_height);
 
     // Cancel interpolation if distance to interpolate is too far. This is a
     // catch-all to solve any remaining interpolation bugs.

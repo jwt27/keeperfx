@@ -228,6 +228,8 @@ static long double multiplayer_clock_adjust = 1;
 long double host_packet_received = 1;
 long double turn_start_offset = 0;
 float interpolate_time = 0;
+float camera_interpolate_time = 0;
+static float camera_interpolate_offset = 0;
 /******************************************************************************/
 
 TbPixel get_player_path_colour(unsigned short owner)
@@ -2697,7 +2699,6 @@ void update(void)
     struct PlayerInfo *player;
     SYNCDBG(4,"Starting for turn %ld",(long)get_gameturn());
 
-    update_local_cameras_pre();
     process_packets();
     api_update_server();
 
@@ -2758,7 +2759,6 @@ void update(void)
 
     message_update();
     update_all_players_cameras();
-    update_local_cameras_post();
     update_player_sounds();
     SYNCDBG(6,"Finished");
 }
@@ -3496,6 +3496,7 @@ static void gameplay_loop_draw()
         game.delta_time = min(time_since_last_draw, 1.L);
         time_since_last_draw = 0;
         interpolate_time = min(max(game.process_turn_time, 0.L), 1.L);
+        camera_interpolate_time = min(max(game.process_turn_time - camera_interpolate_offset, 0.L), 1.L);
         keeper_screen_redraw();
     }
     keeper_wait_for_screen_focus();
@@ -3548,6 +3549,7 @@ static void gameplay_loop_logic()
         const long double turn_start = get_turn_start();
         if (game.process_turn_time < turn_start)
             return;
+        camera_interpolate_offset = max(turn_start, 0.L);
     }
 
     frametime_start_measurement(Frametime_Logic);
@@ -3570,6 +3572,7 @@ static void gameplay_loop_logic()
     poll_inputs();
     input_eastegg();
     input();
+    update_local_cameras();
     exchange_packets();
     update_multiplayer_clock_adjust();
     update_gameplay_delta_time();
@@ -3581,6 +3584,7 @@ static void gameplay_loop_logic()
         update_gameplay_delta_time();
     }
     game.process_turn_time -= 1.0;
+    camera_interpolate_offset -= 1.0;
 
     update();
 

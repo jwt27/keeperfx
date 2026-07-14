@@ -51,17 +51,11 @@ TbBool local_camera_ready;
 
 static struct Packet* get_packet_for_local_camera_update(void)
 {
-    GameTurn turn;
     struct PlayerInfo *player = get_my_player();
     if (player_invalid(player)) {
         return NULL;
     }
-    if (flag_is_set(game.operation_flags, GOF_Paused) && game.game_kind == GKind_LocalGame) {
-        turn = get_gameturn();
-    } else {
-        turn = get_gameturn() - 1;
-    }
-    return (struct Packet *)get_history_packet(player->packet_num, turn);
+    return get_packet_direct(player->packet_num);
 }
 
 void send_camera_catchup_packets(struct PlayerInfo *player)
@@ -198,17 +192,14 @@ void update_camera_deviations(int active_cam_idx)
     }
 }
 
-void update_local_cameras_pre(void)
+void update_local_cameras(void)
 {
     for (int i = 0; i < 4; i++) {
         previous_local_cameras[i] = destination_local_cameras[i];
     }
     previous_deviation_x = destination_deviation_x;
     previous_deviation_y = destination_deviation_y;
-}
 
-void update_local_cameras_post(void)
-{
     if (!local_camera_ready) {
         return;
     }
@@ -242,8 +233,8 @@ void interpolate_camera_deviations(void)
     if (my_player->view_mode == PVM_CreatureView || my_player->view_mode == PVM_FrontView) {
         return;
     }
-    const float interpolated_deviation_x = interpolate(previous_deviation_x, destination_deviation_x);
-    const float interpolated_deviation_y = interpolate(previous_deviation_y, destination_deviation_y);
+    const float interpolated_deviation_x = interpolate_camera_pos(previous_deviation_x, destination_deviation_x);
+    const float interpolated_deviation_y = interpolate_camera_pos(previous_deviation_y, destination_deviation_y);
     long total_deviation_x = (long)interpolated_deviation_x;
     long total_deviation_y = (long)interpolated_deviation_y;
     struct Dungeon* dungeon = get_players_num_dungeon(my_player_number);
@@ -280,13 +271,13 @@ void interpolate_local_cameras(void)
         struct Camera* prev = &previous_local_cameras[i];
         struct Camera* desired = &destination_local_cameras[i];
         struct Camera* out = &local_cameras[i];
-        const float mappos_x = interpolate(prev->mappos.x.val, desired->mappos.x.val);
-        const float mappos_y = interpolate(prev->mappos.y.val, desired->mappos.y.val);
-        const float mappos_z = interpolate(prev->mappos.z.val, desired->mappos.z.val);
-        const float angle_x = interpolate_angle(prev->rotation_angle_x, desired->rotation_angle_x);
-        const float angle_y = interpolate_angle(prev->rotation_angle_y, desired->rotation_angle_y);
-        const float angle_z = interpolate_angle(prev->rotation_angle_z, desired->rotation_angle_z);
-        const float zoom = interpolate(prev->zoom, desired->zoom);
+        const float mappos_x = interpolate_camera_pos(prev->mappos.x.val, desired->mappos.x.val);
+        const float mappos_y = interpolate_camera_pos(prev->mappos.y.val, desired->mappos.y.val);
+        const float mappos_z = interpolate_camera_pos(prev->mappos.z.val, desired->mappos.z.val);
+        const float angle_x = interpolate_camera_angle(prev->rotation_angle_x, desired->rotation_angle_x);
+        const float angle_y = interpolate_camera_angle(prev->rotation_angle_y, desired->rotation_angle_y);
+        const float angle_z = interpolate_camera_angle(prev->rotation_angle_z, desired->rotation_angle_z);
+        const float zoom = interpolate_camera_pos(prev->zoom, desired->zoom);
         out->mappos.x.val = lroundf(mappos_x);
         out->mappos.y.val = lroundf(mappos_y);
         out->mappos.z.val = lroundf(mappos_z);
