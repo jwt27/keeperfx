@@ -3662,6 +3662,11 @@ void keeper_gameplay_loop(void)
 
     initial_time_point();
     LbSleepExtInit();
+    update_gameplay_delta_time();
+    time_since_last_draw = 0.0;
+    game.delta_time = 1.0;
+    game.process_turn_time = 1.0;
+    process_frame_time = 1.0;
 
     //the main gameplay loop starts
     while ((!quit_game) && (!exit_keeper))
