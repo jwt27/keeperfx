@@ -99,14 +99,14 @@ struct NetUser {
     NetUserId id;
     char name[32];
     enum NetUserProgress progress;
-    int ack;
+    uint32_t ack;
     struct GameVersionPacket version;
 };
 
 struct NetFrame {
     struct NetFrame *next;
     char *buffer;
-    int seq_nbr;
+    uint32_t seq_nbr;
     size_t size;
 };
 
@@ -116,7 +116,7 @@ struct NetState {
     struct NetFrame *exchg_queue;
     char password[32];
     NetUserId my_id;
-    int seq_nbr;
+    uint32_t seq_nbr;
     unsigned max_players;
     char msg_buffer[NET_MSG_BUFFER_SIZE];
     char msg_buffer_null;

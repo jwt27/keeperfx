@@ -226,6 +226,7 @@ static long double time_since_last_draw = 0;
 static long double average_frame_draw_time = 1;
 static long double multiplayer_clock_adjust = 1;
 long double host_packet_received = 1;
+long double turn_start_offset = 0;
 float interpolate_time = 0;
 /******************************************************************************/
 
@@ -3399,11 +3400,12 @@ static long double get_turn_start()
     if (game.input_lag_turns > 0 || ! network_is_active())
         return 1.0;
 
-    // Aim to exchange network packets before the turn ends.  If drawing
-    // another frame could miss this deadline, skip it.
-    // In a 3-4 player game, clients must be 2 frames early.
-    const int frames = 1 + (netstate.my_id != SERVER_ID && game.active_players_count > 2);
-    return 1.0 - frames * average_frame_draw_time * multiplayer_clock_adjust * max(game.frame_skip, 1);
+    // Account for network latency: turn_start_offset is the time it takes for a
+    // packet to reach the host, and for the host to relay it.
+    // An additional offset of half a frame is added, so that the packet is sent
+    // at process_turn_time == 1.0 on average, if network lag is zero.
+    return 1.0 - ((turn_start_offset + average_frame_draw_time / 2)
+                  * multiplayer_clock_adjust * max(game.frame_skip, 1));
 }
 
 static void update_multiplayer_clock_adjust()

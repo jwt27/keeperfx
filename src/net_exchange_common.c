@@ -17,6 +17,7 @@
 #include "pre_inc.h"
 #include "net_exchange_common.h"
 
+#include "bflib_enet.h"
 #include "bflib_datetm.h"
 #include "bflib_video.h"
 #include "bflib_inputctrl.h"
@@ -45,6 +46,13 @@
 extern void network_yield_draw_frontend(void);
 extern void network_yield_draw_gameplay(void);
 extern long double host_packet_received;
+extern long double turn_start_offset;
+
+static void set_turn_start_offset(int ping_ms)
+{
+    const float offset_ms = ping_ms / 2.f;
+    turn_start_offset = max(offset_ms / 1e3L * turns_per_second, 0.L);
+}
 
 void send_to_active_peers(int send_count, enum NetworkPeerSendMode send_mode, const char *buffer, size_t msg_size, NetUserId first_skip_id, NetUserId second_skip_id)
 {
@@ -81,7 +89,8 @@ static TbError handle_exchange_message(NetUserId source, void *server_buf, size_
     }
     NetUserId peer_id;
     int32_t seq_nbr;
-    if (message_size < (size_t)(read_pos - netstate.msg_buffer) + 1 + sizeof(seq_nbr)) {
+    int8_t relay_latency;
+    if (message_size < (size_t)(read_pos - netstate.msg_buffer) + 1 + sizeof(seq_nbr) + sizeof(relay_latency)) {
         WARNLOG("Message type %d from %i is too short", (int)message_type, (int)source);
         return Lb_OK;
     }
@@ -91,14 +100,21 @@ static TbError handle_exchange_message(NetUserId source, void *server_buf, size_
         ERRORLOG("Critical error: Out of range peer ID %i received, could be used for buffer overflow attack", peer_id);
         abort();
     }
-    memcpy(&seq_nbr, read_pos, sizeof(seq_nbr));
-    read_pos += sizeof(seq_nbr);
     if (source != SERVER_ID && source != peer_id) {
         WARNLOG("Peer %i tried to send message type %d for peer %i", (int)source, (int)message_type, (int)peer_id);
         return Lb_OK;
     }
+    memcpy(&seq_nbr, read_pos, sizeof(seq_nbr));
+    read_pos += sizeof(seq_nbr);
+    memcpy(&relay_latency, read_pos, sizeof(relay_latency));
+    read_pos += sizeof(relay_latency);
+    if ((int32_t)(seq_nbr - netstate.users[peer_id].ack) > 0)
+    {
+        netstate.users[peer_id].ack = seq_nbr;
+        if (netstate.my_id != SERVER_ID && peer_id == SERVER_ID)
+            set_turn_start_offset(relay_latency + GetPing(SERVER_ID));
+    }
     char *player_frame = (char *)server_buf + peer_id * frame_size;
-    netstate.users[peer_id].ack = seq_nbr;
     size_t payload_size = message_size - (read_pos - netstate.msg_buffer);
     if (message_type == NETMSG_GAMEPLAY_UNSEQUENCED) {
         if (frame_size != sizeof(struct Packet)) {
@@ -266,6 +282,16 @@ TbError exchange_frame_message(void *send_buf, void *server_buf, size_t frame_si
     write_pos += 1;
     memcpy(write_pos, &netstate.seq_nbr, sizeof(netstate.seq_nbr));
     write_pos += sizeof(netstate.seq_nbr);
+    uint8_t relay_latency = 0;
+    if (netstate.my_id == SERVER_ID)
+    {
+        const int ping = GetPing(SERVER_ID);
+        set_turn_start_offset(ping);
+        if (game.active_players_count > 2)
+            relay_latency = clamp(ping, 0, 255);
+    }
+    memcpy(write_pos, &relay_latency, sizeof(relay_latency));
+    write_pos += sizeof(relay_latency);
     if (msg_type == NETMSG_GAMEPLAY_UNSEQUENCED) {
         const struct Packet *current_packet = (const struct Packet *)send_buf;
         unsigned char *packet_count = (unsigned char *)write_pos;
