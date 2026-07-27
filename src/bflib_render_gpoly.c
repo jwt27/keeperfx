@@ -23,6 +23,7 @@
 #include "bflib_video.h"
 #include "bflib_sprite.h"
 #include "bflib_vidraw.h"
+#include <immintrin.h>
 #include "post_inc.h"
 
 #ifdef __GNUC__
@@ -31,6 +32,8 @@
 #else
  #define ALWAYS_INLINE inline
 #endif
+
+#define TARGET_SSE4 __attribute__((target("sse4.1")))
 
 /******************************************************************************/
 static const int32_t gpoly_reptable[] = {
@@ -373,12 +376,29 @@ static TexCoord texcoord_delta_y_top;
 // Y delta along edge BC
 static TexCoord texcoord_delta_y_bottom;
 
+static __m128i SSE4_start_a;
+static __m128i SSE4_start_b;
+static __m128i SSE4_delta_x;
+static __m128i SSE4_delta_y;
+static __m128i SSE4_delta_y_bottom;
+static __m128i SSE4_slope;
+static __m128i SSE4_slope_bottom;
+
 struct GPolyDrawState
 {
     TexCoord texcoord;
     int32_t x_left;  // 16.16
     int32_t x_right; // 16.16
     int x;
+    int y;
+    int y_end;
+    uint8_t *dst_line;
+};
+
+struct SSE4_GPolyDrawState
+{
+    __m128i texcoord;
+    __m128i x_span;  // left, right, b, 0 (16.16)
     int y;
     int y_end;
     uint8_t *dst_line;
@@ -550,6 +570,39 @@ static void calculate_slopes(void)
     slope_right = vertex_b_on_left_side ? slope_ac : slope_ab;
 }
 
+TARGET_SSE4
+static void SSE4_calculate_slopes(void)
+{
+    const __m128i x =
+        _mm_slli_epi32(_mm_sub_epi32(_mm_setr_epi32(vertex_b_x, vertex_c_x, vertex_c_x, 0),
+                                     _mm_setr_epi32(vertex_a_x, vertex_a_x, vertex_b_x, 0)), 16);
+    const __m128i y =  _mm_sub_epi32(_mm_setr_epi32(vertex_b_y, vertex_c_y, vertex_c_y, 1),
+                                     _mm_setr_epi32(vertex_a_y, vertex_a_y, vertex_b_y, 0));
+
+    const __m128i slopes = _mm_cvtps_epi32(_mm_div_ps(_mm_cvtepi32_ps(x), _mm_cvtepi32_ps(y)));
+
+    slope_ab = _mm_extract_epi32(slopes, 0);
+    slope_ac = _mm_extract_epi32(slopes, 1);
+    slope_bc = _mm_extract_epi32(slopes, 2);
+
+    const int ab_x = _mm_extract_epi32(x, 0); // 16.16
+    const int ab_y = _mm_extract_epi32(y, 0); // 32.0
+
+    // Check if vertex B is to the left or right of line AC
+    vertex_b_on_left_side = (ab_y * slope_ac) > ab_x;
+
+    if (vertex_b_on_left_side)
+    {
+        SSE4_slope        = _mm_shuffle_epi32(slopes, _MM_SHUFFLE(3, 3, 1, 0));
+        SSE4_slope_bottom = _mm_shuffle_epi32(slopes, _MM_SHUFFLE(3, 3, 1, 2));
+    }
+    else
+    {
+        SSE4_slope        = _mm_shuffle_epi32(slopes, _MM_SHUFFLE(3, 3, 0, 1));
+        SSE4_slope_bottom = _mm_shuffle_epi32(slopes, _MM_SHUFFLE(3, 3, 2, 1));
+    }
+}
+
 // Return 1.0/val (actually 0.999...) in signed 1.31, argument must be positive.
 static int32_t reciprocal(uint32_t val)
 {
@@ -629,6 +682,51 @@ static void calculate_texture_mapping(void)
     }
 }
 
+TARGET_SSE4
+static void SSE4_calculate_texture_mapping(void)
+{
+    // Calculate texture deltas for X step.
+
+    const int biased_b_x = vertex_b_x + (vertex_b_on_left_side ? -1 : +1);
+
+    const __m128i uvsx =
+        _mm_sub_epi16(_mm_setr_epi16(vertex_b_texture_u, vertex_c_texture_u, vertex_b_texture_v, vertex_c_texture_v, vertex_b_shade, vertex_c_shade, biased_b_x, vertex_c_x),
+                      _mm_setr_epi16(vertex_a_texture_u, vertex_a_texture_u, vertex_a_texture_v, vertex_a_texture_v, vertex_a_shade, vertex_a_shade, vertex_a_x, vertex_a_x));
+
+    const __m128i y =
+        _mm_sub_epi16(_mm_setr_epi16(vertex_c_y, vertex_a_y, vertex_c_y, vertex_b_y, 0, 0, 0, 0),
+                      _mm_setr_epi16(vertex_a_y, vertex_b_y, vertex_b_y, vertex_a_y, 0, 0, 0, 0));
+
+    const __m128 cross = _mm_cvtepi32_ps(_mm_madd_epi16(uvsx, _mm_shuffle_epi32(y, _MM_SHUFFLE(0, 0, 0, 0))));
+    const __m128 deltas = _mm_div_ps(cross, _mm_shuffle_ps(cross, cross, _MM_SHUFFLE(3, 3, 3, 3)));
+
+    SSE4_delta_x = _mm_cvtps_epi32(_mm_mul_ps(deltas, _mm_set1_ps(1L << 16)));
+
+    // Calculate texture deltas for Y step.
+
+    const __m128 y_ps = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(y));
+
+    if (vertex_b_on_left_side)
+    {
+        const __m128i ab_uvs = _mm_shuffle_epi8(uvsx, _mm_setr_epi8(-1, -1,  0,  1, -1, -1,  4,  5, -1, -1,  8,  9, -1, -1, -1, -1));
+        const __m128 ab_y = _mm_shuffle_ps(y_ps, y_ps, _MM_SHUFFLE(3, 3, 3, 3));
+        SSE4_delta_y = _mm_cvtps_epi32(_mm_div_ps(_mm_cvtepi32_ps(ab_uvs), ab_y));
+
+        const __m128i bc_uvs =
+            _mm_sub_epi32(_mm_setr_epi16(0, vertex_c_texture_u, 0, vertex_c_texture_v, 0, vertex_c_shade, 0, 0),
+                          _mm_setr_epi16(0, vertex_b_texture_u, 0, vertex_b_texture_v, 0, vertex_b_shade, 0, 0));
+        const __m128 bc_y = _mm_shuffle_ps(y_ps, y_ps, _MM_SHUFFLE(2, 2, 2, 2));
+        SSE4_delta_y_bottom = _mm_cvtps_epi32(_mm_div_ps(_mm_cvtepi32_ps(bc_uvs), bc_y));
+    }
+    else
+    {
+        const __m128i ac_uvs = _mm_shuffle_epi8(uvsx, _mm_setr_epi8(-1, -1,  2,  3, -1, -1,  6,  7, -1, -1, 10, 11, -1, -1, -1, -1));
+        const __m128 ac_y = _mm_shuffle_ps(y_ps, y_ps, _MM_SHUFFLE(0, 0, 0, 0));
+        SSE4_delta_y = _mm_cvtps_epi32(_mm_div_ps(_mm_cvtepi32_ps(ac_uvs), ac_y));
+        SSE4_delta_y_bottom = SSE4_delta_y;
+    }
+}
+
 static void pack_texcoords(void)
 {
     {
@@ -693,6 +791,24 @@ static void draw_gpoly_line(uint8_t *restrict pixel_dst, int32_t length, TexCoor
     }
 }
 
+TARGET_SSE4
+static void SSE4_draw_gpoly_line(uint8_t *restrict pixel_dst, int32_t length, __m128i texcoord)
+{
+    const uint8_t *const restrict texture = vec_map;
+    const uint8_t *const restrict fade_table = render_fade_tables;
+    const __m128i mask_uv    = _mm_setr_epi8( 2,  6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i mask_shade = _mm_setr_epi8(-1, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i step = SSE4_delta_x;
+
+    for (int i = 0; i < length; i++) {
+        const uint32_t uv    = _mm_extract_epi32(_mm_shuffle_epi8(texcoord, mask_uv   ), 0);
+        const uint32_t shade = _mm_extract_epi32(_mm_shuffle_epi8(texcoord, mask_shade), 0);
+        const uint8_t texel = texture[uv];
+        pixel_dst[i] = fade_table[shade | texel];
+        texcoord = _mm_add_epi32(texcoord, step);
+    }
+}
+
 ALWAYS_INLINE
 static void next_line(struct GPolyDrawState *state)
 {
@@ -701,6 +817,15 @@ static void next_line(struct GPolyDrawState *state)
     state->x_left   += slope_left;
     state->x_right  += slope_right;
     state->x        += state->x_left >> 16;
+    state->dst_line += vec_screen_width;
+    state->y        += 1;
+}
+
+TARGET_SSE4 ALWAYS_INLINE
+static void SSE4_next_line(struct SSE4_GPolyDrawState *state)
+{
+    state->texcoord  = _mm_add_epi32(state->texcoord, SSE4_delta_y);
+    state->x_span    = _mm_add_epi32(state->x_span,   SSE4_slope);
     state->dst_line += vec_screen_width;
     state->y        += 1;
 }
@@ -728,6 +853,41 @@ static void draw_gpoly_clipped_half(struct GPolyDrawState *state)
     }
 }
 
+TARGET_SSE4 ALWAYS_INLINE
+static void SSE4_draw_gpoly_clipped_half(struct SSE4_GPolyDrawState *state)
+{
+    const int clip_y = min(state->y_end - state->y, 0 - state->y);
+    if (clip_y > 0)
+    {
+        const __m128i vclip_y = _mm_set1_epi32(clip_y);
+        state->texcoord  = _mm_add_epi32(state->texcoord, _mm_mullo_epi32(SSE4_delta_y, vclip_y));
+        state->x_span    = _mm_add_epi32(state->x_span,   _mm_mullo_epi32(SSE4_slope,   vclip_y));
+        state->dst_line += vec_screen_width * clip_y;
+        state->y        += clip_y;
+    }
+
+    for (; state->y < state->y_end; SSE4_next_line(state))
+    {
+        __m128i texcoord = state->texcoord;
+        const __m128i x_lr = _mm_srai_epi32(state->x_span, 16);
+        int x_left_int  = _mm_extract_epi32(x_lr, 0);
+        const int x_right_int = min(_mm_extract_epi32(x_lr, 1), vec_window_width);
+
+        if (x_left_int < 0)
+        {
+            const int clip_x = -x_left_int;
+            const __m128i vclip_x = _mm_mullo_epi32(_mm_set1_epi32(clip_x), SSE4_delta_x);
+            texcoord = _mm_add_epi32(texcoord, vclip_x);
+            x_left_int = 0;
+        }
+
+        const int length = x_right_int - x_left_int;
+        uint8_t *const dst = state->dst_line + x_left_int;
+
+        SSE4_draw_gpoly_line(dst, length, texcoord);
+    }
+}
+
 ALWAYS_INLINE
 static void draw_gpoly_whole_half(struct GPolyDrawState *state)
 {
@@ -742,6 +902,21 @@ static void draw_gpoly_whole_half(struct GPolyDrawState *state)
         uint8_t *const dst = state->dst_line + x_left_int;
 
         draw_gpoly_line(dst, length, state->texcoord);
+    }
+}
+
+TARGET_SSE4 ALWAYS_INLINE
+static void SSE4_draw_gpoly_whole_half(struct SSE4_GPolyDrawState *state)
+{
+    for (; state->y < state->y_end; SSE4_next_line(state))
+    {
+        const __m128i x_lr = _mm_srai_epi32(state->x_span, 16);
+        const int x_left_int  =     _mm_extract_epi32(x_lr, 0);
+        const int x_right_int = min(_mm_extract_epi32(x_lr, 1), vec_window_width);
+        const int length = x_right_int - x_left_int;
+        uint8_t *const dst = state->dst_line + x_left_int;
+
+        SSE4_draw_gpoly_line(dst, length, state->texcoord);
     }
 }
 
@@ -779,6 +954,41 @@ static void draw_gpoly_clipped(void)
     draw_gpoly_clipped_half(&state);
 }
 
+TARGET_SSE4
+static void SSE4_draw_gpoly_clipped(void)
+{
+    struct SSE4_GPolyDrawState state;
+
+    state.texcoord = SSE4_start_a;
+    state.x_span   = _mm_slli_epi32(_mm_setr_epi32(vertex_a_x, vertex_a_x, vertex_b_x, 0), 16);
+    state.y        = vertex_a_y;
+    state.y_end    = min(vertex_b_y, vec_window_height);
+    state.dst_line = &vec_screen[vec_screen_width * state.y];
+
+    // First line is always 0 pixels, skip it.
+    if (state.y < state.y_end)
+        SSE4_next_line(&state);
+
+    SSE4_draw_gpoly_clipped_half(&state);
+
+    if (vertex_b_on_left_side)
+    {
+        state.texcoord = SSE4_start_b;
+        state.x_span = _mm_shuffle_epi32(state.x_span, _MM_SHUFFLE(3, 3, 1, 2));
+    }
+    else
+    {
+        state.x_span = _mm_shuffle_epi32(state.x_span, _MM_SHUFFLE(3, 3, 2, 0));
+    }
+
+    SSE4_slope   = SSE4_slope_bottom;
+    SSE4_delta_y = SSE4_delta_y_bottom;
+    state.y      = vertex_b_y;
+    state.y_end  = min(vertex_c_y, vec_window_height);
+
+    SSE4_draw_gpoly_clipped_half(&state);
+}
+
 static void draw_gpoly_whole(void)
 {
     // state.x is not used here.
@@ -810,6 +1020,78 @@ static void draw_gpoly_whole(void)
     state.y_end = min(vertex_c_y, vec_window_height);
 
     draw_gpoly_whole_half(&state);
+}
+
+TARGET_SSE4
+static void SSE4_draw_gpoly_whole(void)
+{
+    struct SSE4_GPolyDrawState state;
+
+    state.texcoord = SSE4_start_a;
+    state.x_span   = _mm_slli_epi32(_mm_setr_epi32(vertex_a_x, vertex_a_x, vertex_b_x, 0), 16);
+    state.y        = vertex_a_y;
+    state.y_end    = min(vertex_b_y, vec_window_height);
+    state.dst_line = &vec_screen[vec_screen_width * state.y];
+
+    // First line is always 0 pixels, skip it.
+    if (state.y < state.y_end)
+        SSE4_next_line(&state);
+
+    SSE4_draw_gpoly_whole_half(&state);
+
+    if (vertex_b_on_left_side)
+    {
+        state.texcoord = SSE4_start_b;
+        state.x_span = _mm_shuffle_epi32(state.x_span, _MM_SHUFFLE(3, 3, 1, 2));
+    }
+    else
+    {
+        state.x_span = _mm_shuffle_epi32(state.x_span, _MM_SHUFFLE(3, 3, 2, 0));
+    }
+
+    SSE4_slope   = SSE4_slope_bottom;
+    SSE4_delta_y = SSE4_delta_y_bottom;
+    state.y      = vertex_b_y;
+    state.y_end  = min(vertex_c_y, vec_window_height);
+
+    SSE4_draw_gpoly_whole_half(&state);
+}
+
+static void draw_gpoly_impl(void)
+{
+    const bool clip_x = (  (vertex_a_x) | (vec_window_width - vertex_a_x)
+                         | (vertex_b_x) | (vec_window_width - vertex_b_x)
+                         | (vertex_c_x) | (vec_window_width - vertex_c_x) ) < 0;
+
+    calculate_slopes();
+    calculate_texture_mapping();
+    pack_texcoords();
+
+    if (clip_x)
+        draw_gpoly_clipped();
+    else
+        draw_gpoly_whole();
+}
+
+TARGET_SSE4
+static void SSE4_draw_gpoly_impl(void)
+{
+    _MM_SET_ROUNDING_MODE(_MM_ROUND_TOWARD_ZERO);
+
+    const bool clip = (  vertex_a_x | vertex_a_y
+                       | vertex_b_x | vertex_b_y
+                       | vertex_c_x | vertex_c_y ) < 0;
+
+    SSE4_calculate_slopes();
+    SSE4_calculate_texture_mapping();
+
+    SSE4_start_a = _mm_slli_epi32(_mm_setr_epi32(vertex_a_texture_u, vertex_a_texture_v, vertex_a_shade, 0), 16);
+    SSE4_start_b = _mm_slli_epi32(_mm_setr_epi32(vertex_b_texture_u, vertex_b_texture_v, vertex_b_shade, 0), 16);
+
+    if (clip)
+        SSE4_draw_gpoly_clipped();
+    else
+        SSE4_draw_gpoly_whole();
 }
 
 void draw_gpoly(struct PolyPoint *point_a, struct PolyPoint *point_b, struct PolyPoint *point_c)
@@ -861,18 +1143,22 @@ void draw_gpoly(struct PolyPoint *point_a, struct PolyPoint *point_b, struct Pol
     vertex_c_texture_u = point_c->U >> 16;
     vertex_c_texture_v = point_c->V >> 16;
 
-    const bool clip_x = (  (vertex_a_x) | (vec_window_width - vertex_a_x)
-                         | (vertex_b_x) | (vec_window_width - vertex_b_x)
-                         | (vertex_c_x) | (vec_window_width - vertex_c_x) ) < 0;
 
-    calculate_slopes();
-    calculate_texture_mapping();
-    pack_texcoords();
-
-    if (clip_x)
-        draw_gpoly_clipped();
-    else
-        draw_gpoly_whole();
+    static void (*impl)(void) = NULL;
+    if (impl == NULL)
+    {
+        if (SDL_HasSSE41())
+        {
+            JUSTLOG("SSE4.1");
+            impl = SSE4_draw_gpoly_impl;
+        }
+        else
+        {
+            JUSTLOG("no simd");
+            impl = draw_gpoly_impl;
+        }
+    }
+    impl();
 }
 
 /******************************************************************************/
